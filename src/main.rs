@@ -3,10 +3,11 @@ mod platform;
 use std::{
     collections::BTreeMap,
     env,
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -149,7 +150,7 @@ struct Config {
 #[derive(Debug, Deserialize)]
 struct Profile {
     #[serde(rename = "type")]
-    profile_type: String,
+    kind: String,
     program: String,
     #[serde(default)]
     args: Vec<String>,
@@ -210,7 +211,7 @@ fn execute(command: Commands) -> AppResult<()> {
                 args.push(hostname);
             }
             let selected_scheme = select_scheme(&scheme, None, "github", Some("gh"))?;
-            resolve_command("github", "gh", args, selected_scheme)
+            resolve_command("github", "gh", &args, selected_scheme.as_deref())
         }
         Commands::Exec { scheme, command } => {
             let Some((program, args)) = command.split_first() else {
@@ -222,7 +223,7 @@ fn execute(command: Commands) -> AppResult<()> {
                 ));
             };
             let selected_scheme = select_scheme(&scheme, None, "exec", Some(program))?;
-            resolve_command("exec", program, args.to_vec(), selected_scheme)
+            resolve_command("exec", program, args, selected_scheme.as_deref())
         }
         Commands::Profile { name, scheme } => execute_profile(&name, &scheme),
         Commands::Log {
@@ -280,7 +281,7 @@ fn execute_profile(name: &str, options: &SchemeOptions) -> AppResult<()> {
             ),
         ));
     };
-    if profile.profile_type != "command" || profile.program.is_empty() {
+    if profile.kind != "command" || profile.program.is_empty() {
         return Err(AppError::tool(
             format!("profile:{name}"),
             (!profile.program.is_empty()).then_some(profile.program.as_str()),
@@ -297,8 +298,8 @@ fn execute_profile(name: &str, options: &SchemeOptions) -> AppResult<()> {
     resolve_command(
         format!("profile:{name}"),
         &profile.program,
-        profile.args.clone(),
-        selected_scheme,
+        &profile.args,
+        selected_scheme.as_deref(),
     )
 }
 
@@ -348,8 +349,8 @@ fn validate_scheme(
 fn resolve_command(
     provider: impl Into<String>,
     program: &str,
-    args: Vec<String>,
-    scheme: Option<String>,
+    args: &[String],
+    scheme: Option<&str>,
 ) -> AppResult<()> {
     let provider = provider.into();
     let expanded_args = args
@@ -361,7 +362,7 @@ fn resolve_command(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let credential = run_process(&provider, program, &expanded_args)?;
-    let header = format_header(&credential, scheme.as_deref()).map_err(|message| {
+    let header = format_header(&credential, scheme).map_err(|message| {
         AppError::tool(
             &provider,
             Some(program),
@@ -412,39 +413,11 @@ fn run_process(provider: &str, program: &str, args: &[String]) -> AppResult<Stri
         (result, bytes)
     });
 
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= COMMAND_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AppError::invocation(
-                    provider,
-                    Some(program),
-                    "process-timeout",
-                    format!(
-                        "credential command `{program}` timed out after {} seconds",
-                        COMMAND_TIMEOUT.as_secs()
-                    ),
-                    started.elapsed().as_millis(),
-                    None,
-                ));
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AppError::invocation(
-                    provider,
-                    Some(program),
-                    "process-wait-failed",
-                    format!("could not wait for `{program}`: {error}"),
-                    started.elapsed().as_millis(),
-                    None,
-                ));
-            }
+    let status = match wait_for_process(provider, program, started, &mut child) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = reader.join();
+            return Err(error);
         }
     };
     let (read_result, output) = reader.join().map_err(|_| {
@@ -489,6 +462,50 @@ fn run_process(provider: &str, program: &str, args: &[String]) -> AppResult<Stri
             "credential command output was not valid UTF-8",
         )
     })
+}
+
+fn wait_for_process(
+    provider: &str,
+    program: &str,
+    started: Instant,
+    child: &mut Child,
+) -> AppResult<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() >= COMMAND_TIMEOUT => {
+                terminate_process(child);
+                return Err(AppError::invocation(
+                    provider,
+                    Some(program),
+                    "process-timeout",
+                    format!(
+                        "credential command `{program}` timed out after {} seconds",
+                        COMMAND_TIMEOUT.as_secs()
+                    ),
+                    started.elapsed().as_millis(),
+                    None,
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                terminate_process(child);
+                return Err(AppError::invocation(
+                    provider,
+                    Some(program),
+                    "process-wait-failed",
+                    format!("could not wait for `{program}`: {error}"),
+                    started.elapsed().as_millis(),
+                    None,
+                ));
+            }
+        }
+    }
+}
+
+fn terminate_process(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn status_text(code: Option<i32>) -> String {
@@ -686,8 +703,7 @@ fn write_failure_record(error: &AppError) -> Result<(), String> {
         executable: error
             .executable
             .as_deref()
-            .map(executable_basename)
-            .unwrap_or_else(|| "-".to_owned()),
+            .map_or_else(|| "-".to_owned(), executable_basename),
         category: error.category.as_str().to_owned(),
         error_code: error.code.clone(),
         exit_code: error.exit_code,
@@ -702,7 +718,7 @@ fn write_failure_record(error: &AppError) -> Result<(), String> {
         .map_err(|error| format!("could not create temporary record: {error}"))?;
     platform::set_private_file(&file)?;
     file.write_all(text.as_bytes())
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|error| format!("could not write failure record: {error}"))?;
     drop(file);
     fs::rename(&temporary, entries_dir.join(format!("{id}.log")))
@@ -836,7 +852,7 @@ fn encode_field(value: &str) -> String {
             encoded.push(byte as char);
         } else {
             encoded.push('%');
-            encoded.push_str(&format!("{byte:02X}"));
+            let _ = write!(encoded, "{byte:02X}");
         }
     }
     encoded
@@ -910,8 +926,7 @@ fn platform_config_dir() -> PathBuf {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir().join(".config"))
+            .map_or_else(|| home_dir().join(".config"), PathBuf::from)
             .join("auth-header")
     }
 }
@@ -931,16 +946,13 @@ fn platform_state_dir() -> PathBuf {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir().join(".local/state"))
+            .map_or_else(|| home_dir().join(".local/state"), PathBuf::from)
             .join("auth-header")
     }
 }
 
 fn home_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 fn now_millis() -> u128 {
