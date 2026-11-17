@@ -1,5 +1,5 @@
-#[cfg(unix)]
-use std::fs::File;
+mod platform;
+
 use std::{
     collections::BTreeMap,
     env,
@@ -674,8 +674,7 @@ fn write_failure_record(error: &AppError) -> Result<(), String> {
     let entries_dir = state_entries_dir();
     fs::create_dir_all(&entries_dir)
         .map_err(|error| format!("could not create {}: {error}", entries_dir.display()))?;
-    #[cfg(unix)]
-    set_private_directory(&entries_dir)?;
+    platform::set_private_directory(&entries_dir)?;
     let timestamp = now_millis();
     let counter = RECORD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let id = format!("{timestamp:x}-{:x}-{counter:x}", std::process::id());
@@ -701,8 +700,7 @@ fn write_failure_record(error: &AppError) -> Result<(), String> {
         .create_new(true)
         .open(&temporary)
         .map_err(|error| format!("could not create temporary record: {error}"))?;
-    #[cfg(unix)]
-    set_private_file(&file)?;
+    platform::set_private_file(&file)?;
     file.write_all(text.as_bytes())
         .and_then(|_| file.sync_all())
         .map_err(|error| format!("could not write failure record: {error}"))?;
@@ -950,20 +948,6 @@ fn now_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-#[cfg(unix)]
-fn set_private_directory(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("could not secure {}: {error}", path.display()))
-}
-
-#[cfg(unix)]
-fn set_private_file(file: &File) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("could not secure failure record: {error}"))
 }
 
 #[cfg(test)]
