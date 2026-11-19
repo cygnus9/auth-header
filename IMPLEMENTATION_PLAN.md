@@ -86,10 +86,11 @@ auth-header log
 auth-header log --count 20
 auth-header log --all
 auth-header log --id <id>
+auth-header log --utc
 auth-header log --path
 ```
 
-`auth-header log` lists the ten most recent retained failure records by default. `--count N` changes the number, `--all` lists every retained record, and `--id` prints the complete record for one failure. The command must not invoke the configured provider.
+`auth-header log` lists the ten most recent retained failure records by default. `--count N` changes the number, `--all` lists every retained record, and `--id` prints the complete record for one failure. List and detail timestamps default to the process environment's local timezone; `--utc` selects UTC. Displayed timestamps use the exact shape `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`, including milliseconds and a numeric offset. The command must not invoke the configured provider.
 
 ### General behavior
 
@@ -190,11 +191,11 @@ The failure record is for failures in `auth-header` or its credential source inv
 `auth-header log` lists recent failures in descending timestamp order. Each list entry contains:
 
 - short opaque identifier
-- timestamp
+- timestamp formatted as `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`
 - provider or profile
 - failure category
 
-`auth-header log --id <id>` prints the complete safe record for one entry. The identifier is the supported lookup mechanism; users do not need to find or provide a filesystem path.
+The default display timezone is the process environment's local timezone. `--utc` selects UTC and renders the offset as `+00:00`. `auth-header log --id <id>` prints the complete safe record for one entry with the same timestamp formatting. The identifier is the supported lookup mechanism; users do not need to find or provide a filesystem path.
 
 Use these top-level categories:
 
@@ -218,7 +219,7 @@ Write records atomically where practical. If logging fails, it must not replace 
 Permitted fields:
 
 - short record ID
-- timestamp
+- timestamp as a numeric Unix epoch-millisecond value
 - auth-header version
 - provider/profile name
 - executable basename
@@ -226,6 +227,8 @@ Permitted fields:
 - specific error code
 - child exit code, when available
 - duration
+
+The timestamp representation in each persisted record is unchanged by display formatting; list and detail output convert it only at presentation time.
 
 Never log:
 

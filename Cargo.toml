@@ -6,6 +6,7 @@ description = "Resolve credentials into HTTP authorization header values"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

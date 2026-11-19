@@ -70,8 +70,11 @@ auth-header log
 auth-header log --count 20
 auth-header log --all
 auth-header log --id <id>
+auth-header log --utc
 auth-header log --path
 ```
+
+List and detail timestamps default to the process environment's local timezone. Use `--utc` to select UTC. Displayed timestamps use `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`; persisted records retain numeric Unix epoch-millisecond timestamps.
 
 Records contain only an opaque ID, timestamp, version, provider, executable basename, category, error code, exit code, and duration. Credentials, generated headers, child output, environment values, and argument lists are never persisted. Up to 100 recent records are retained. If record writing fails, the original provider error and exit status are preserved.
 

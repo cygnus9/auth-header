@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{Local, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 
@@ -64,6 +65,8 @@ enum Commands {
         id: Option<String>,
         #[arg(long, conflicts_with_all = ["count", "all", "id"])]
         path: bool,
+        #[arg(long)]
+        utc: bool,
     },
 }
 
@@ -231,7 +234,8 @@ fn execute(command: Commands) -> AppResult<()> {
             all,
             id,
             path,
-        } => execute_log(count, all, id, path),
+            utc,
+        } => execute_log(count, all, id, path, utc),
     }
 }
 
@@ -568,7 +572,13 @@ fn normalize_credential(raw: &str) -> Result<String, String> {
     Ok(normalized.to_owned())
 }
 
-fn execute_log(count: Option<usize>, all: bool, id: Option<String>, path: bool) -> AppResult<()> {
+fn execute_log(
+    count: Option<usize>,
+    all: bool,
+    id: Option<String>,
+    path: bool,
+    utc: bool,
+) -> AppResult<()> {
     let entries_dir = state_entries_dir();
     if path {
         println!("{}", entries_dir.display());
@@ -594,7 +604,7 @@ fn execute_log(count: Option<usize>, all: bool, id: Option<String>, path: bool) 
         })?;
         let record = parse_record(&text)
             .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
-        print_record(&record);
+        print_record(&record, utc)?;
         return Ok(());
     }
 
@@ -611,9 +621,11 @@ fn execute_log(count: Option<usize>, all: bool, id: Option<String>, path: bool) 
         count.unwrap_or(DEFAULT_LOG_COUNT)
     };
     for record in records.into_iter().take(limit) {
+        let timestamp = format_timestamp(record.timestamp, utc)
+            .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
         println!(
             "{}\t{}\t{}\t{}",
-            record.id, record.timestamp, record.provider, record.category
+            record.id, timestamp, record.provider, record.category
         );
     }
     Ok(())
@@ -665,9 +677,11 @@ fn read_records(entries_dir: &Path) -> AppResult<Vec<FailureRecord>> {
     Ok(records)
 }
 
-fn print_record(record: &FailureRecord) {
+fn print_record(record: &FailureRecord, utc: bool) -> AppResult<()> {
+    let timestamp = format_timestamp(record.timestamp, utc)
+        .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
     println!("id: {}", record.id);
-    println!("timestamp: {}", record.timestamp);
+    println!("timestamp: {timestamp}");
     println!("version: {}", record.version);
     println!("provider: {}", record.provider);
     println!("executable: {}", record.executable);
@@ -685,6 +699,7 @@ fn print_record(record: &FailureRecord) {
             .duration_ms
             .map_or_else(|| "-".to_owned(), |duration| duration.to_string())
     );
+    Ok(())
 }
 
 fn write_failure_record(error: &AppError) -> Result<(), String> {
@@ -962,6 +977,23 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
+fn format_timestamp(timestamp: u128, utc: bool) -> Result<String, String> {
+    let millis = i64::try_from(timestamp)
+        .map_err(|_| format!("invalid timestamp {timestamp}: outside supported range"))?;
+    let instant = Utc
+        .timestamp_millis_opt(millis)
+        .single()
+        .ok_or_else(|| format!("invalid timestamp {timestamp}: outside supported range"))?;
+    if utc {
+        Ok(instant.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string())
+    } else {
+        Ok(instant
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S%.3f %:z")
+            .to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1066,42 @@ mod tests {
     }
 
     #[test]
+    fn log_parser_accepts_utc_without_changing_defaults() {
+        let cli = Cli::try_parse_from(["auth-header", "log", "--utc"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Log {
+                count: None,
+                all: false,
+                id: None,
+                path: false,
+                utc: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn timestamp_formatting_uses_utc_or_local_time() {
+        assert_eq!(
+            format_timestamp(0, true),
+            Ok("1970-01-01 00:00:00.000 +00:00".to_owned())
+        );
+        let expected_local = Utc
+            .timestamp_millis_opt(0)
+            .single()
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S%.3f %:z")
+            .to_string();
+        assert_eq!(format_timestamp(0, false), Ok(expected_local));
+    }
+
+    #[test]
+    fn timestamp_formatting_rejects_unrepresentable_values() {
+        assert!(format_timestamp(u128::MAX, true).is_err());
+    }
+
+    #[test]
     fn records_store_only_executable_basename() {
         assert_eq!(executable_basename("/opt/tools/company-cli"), "company-cli");
     }
@@ -1051,7 +1119,10 @@ mod tests {
             exit_code: Some(2),
             duration_ms: Some(4),
         };
-        let parsed = parse_record(&serialize_record(&record)).unwrap();
+        let serialized = serialize_record(&record);
+        assert!(serialized.contains("timestamp=123\n"));
+        let parsed = parse_record(&serialized).unwrap();
+        assert_eq!(parsed.timestamp, 123);
         assert_eq!(parsed.provider, record.provider);
         assert_eq!(parsed.executable, record.executable);
         assert_eq!(parsed.exit_code, Some(2));
