@@ -87,10 +87,14 @@ auth-header log --count 20
 auth-header log --all
 auth-header log --id <id>
 auth-header log --utc
+auth-header log --json
+auth-header log --id <id> --json
 auth-header log --path
 ```
 
-`auth-header log` lists the ten most recent retained failure records by default. `--count N` changes the number, `--all` lists every retained record, and `--id` prints the complete record for one failure. List and detail timestamps default to the process environment's local timezone; `--utc` selects UTC. Displayed timestamps use the exact shape `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`, including milliseconds and a numeric offset. The command must not invoke the configured provider.
+`auth-header log` lists the ten most recent retained failure records by default. `--count N` changes the number, `--all` lists every retained record, and `--id` prints the complete record for one failure. Human list and detail timestamps default to the process environment's local timezone; `--utc` selects UTC. Human-readable timestamps use the exact shape `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`, including milliseconds and a numeric offset.
+
+`--json` emits pretty-printed output. List mode is a top-level JSON array with exactly these fields per entry, in this order: `id` (string), `timestamp` (RFC 3339 string), `provider` (string), and `category` (string). Detail mode is one top-level JSON object with exactly these fields, in this order: `id`, `timestamp`, `version`, `provider`, `executable`, `category`, `error_code`, `exit_code`, and `duration_ms`; unavailable `exit_code` and `duration_ms` values are JSON `null`. JSON timestamps have millisecond precision and a numeric offset. List JSON honors `--utc`; detail JSON is always UTC, and `auth-header log --id <id> --json --utc` is rejected. The command must not invoke the configured provider.
 
 ### General behavior
 
@@ -188,14 +192,14 @@ The failure record is for failures in `auth-header` or its credential source inv
 
 ### Log command
 
-`auth-header log` lists recent failures in descending timestamp order. Each list entry contains:
+`auth-header log` lists recent failures in descending timestamp order. Human-readable list entries contain:
 
 - short opaque identifier
 - timestamp formatted as `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`
 - provider or profile
 - failure category
 
-The default display timezone is the process environment's local timezone. `--utc` selects UTC and renders the offset as `+00:00`. `auth-header log --id <id>` prints the complete safe record for one entry with the same timestamp formatting. The identifier is the supported lookup mechanism; users do not need to find or provide a filesystem path.
+With `--json`, list mode emits a pretty-printed top-level JSON array. Each entry has exactly these fields, in this order: `id` (string), `timestamp` (RFC 3339 string), `provider` (string), and `category` (string). Detail mode emits a pretty-printed top-level JSON object with exactly these fields, in this order: `id`, `timestamp`, `version`, `provider`, `executable`, `category`, `error_code`, `exit_code`, and `duration_ms`; unavailable optional values are JSON `null`. JSON timestamps use RFC 3339 with millisecond precision and a numeric offset. List JSON follows `--utc`; `auth-header log --id <id> --json` always uses UTC and rejects `--utc`. The identifier is the supported lookup mechanism; users do not need to find or provide a filesystem path.
 
 Use these top-level categories:
 

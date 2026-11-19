@@ -13,9 +13,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{Local, TimeZone, Utc};
+use chrono::{DateTime, Local, SecondsFormat, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_LOG_COUNT: usize = 10;
@@ -65,6 +65,8 @@ enum Commands {
         id: Option<String>,
         #[arg(long, conflicts_with_all = ["count", "all", "id"])]
         path: bool,
+        #[arg(long, conflicts_with = "path")]
+        json: bool,
         #[arg(long)]
         utc: bool,
     },
@@ -173,6 +175,27 @@ struct FailureRecord {
     duration_ms: Option<u128>,
 }
 
+#[derive(Debug, Serialize)]
+struct JsonLogEntry {
+    id: String,
+    timestamp: String,
+    provider: String,
+    category: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonLogRecord {
+    id: String,
+    timestamp: String,
+    version: String,
+    provider: String,
+    executable: String,
+    category: String,
+    error_code: String,
+    exit_code: Option<i32>,
+    duration_ms: Option<u128>,
+}
+
 fn main() {
     let cli = Cli::parse();
     let is_log = matches!(cli.command, Commands::Log { .. });
@@ -234,8 +257,9 @@ fn execute(command: Commands) -> AppResult<()> {
             all,
             id,
             path,
+            json,
             utc,
-        } => execute_log(count, all, id, path, utc),
+        } => execute_log(count, all, id, path, utc, json),
     }
 }
 
@@ -578,7 +602,16 @@ fn execute_log(
     id: Option<String>,
     path: bool,
     utc: bool,
+    json: bool,
 ) -> AppResult<()> {
+    if json && id.is_some() && utc {
+        return Err(AppError::tool(
+            "log",
+            None,
+            "configuration-invalid",
+            "--utc cannot be used with --id --json",
+        ));
+    }
     let entries_dir = state_entries_dir();
     if path {
         println!("{}", entries_dir.display());
@@ -604,7 +637,11 @@ fn execute_log(
         })?;
         let record = parse_record(&text)
             .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
-        print_record(&record, utc)?;
+        if json {
+            print_json_record(&record)?;
+        } else {
+            print_record(&record, utc)?;
+        }
         return Ok(());
     }
 
@@ -620,7 +657,11 @@ fn execute_log(
     } else {
         count.unwrap_or(DEFAULT_LOG_COUNT)
     };
-    for record in records.into_iter().take(limit) {
+    let selected = records.into_iter().take(limit).collect::<Vec<_>>();
+    if json {
+        return print_json_entries(&selected, utc);
+    }
+    for record in selected {
         let timestamp = format_timestamp(record.timestamp, utc)
             .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
         println!(
@@ -699,6 +740,50 @@ fn print_record(record: &FailureRecord, utc: bool) -> AppResult<()> {
             .duration_ms
             .map_or_else(|| "-".to_owned(), |duration| duration.to_string())
     );
+    Ok(())
+}
+fn serialize_json_entries(records: &[FailureRecord], utc: bool) -> Result<String, String> {
+    let entries = records
+        .iter()
+        .map(|record| {
+            Ok(JsonLogEntry {
+                id: record.id.clone(),
+                timestamp: format_rfc3339_timestamp(record.timestamp, utc)?,
+                provider: record.provider.clone(),
+                category: record.category.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    serde_json::to_string_pretty(&entries)
+        .map_err(|error| format!("could not serialize JSON log output: {error}"))
+}
+
+fn print_json_entries(records: &[FailureRecord], utc: bool) -> AppResult<()> {
+    let output = serialize_json_entries(records, utc)
+        .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
+    println!("{output}");
+    Ok(())
+}
+
+fn serialize_json_record(record: &FailureRecord) -> Result<String, String> {
+    serde_json::to_string_pretty(&JsonLogRecord {
+        id: record.id.clone(),
+        timestamp: format_rfc3339_timestamp(record.timestamp, true)?,
+        version: record.version.clone(),
+        provider: record.provider.clone(),
+        executable: record.executable.clone(),
+        category: record.category.clone(),
+        error_code: record.error_code.clone(),
+        exit_code: record.exit_code,
+        duration_ms: record.duration_ms,
+    })
+    .map_err(|error| format!("could not serialize JSON log output: {error}"))
+}
+
+fn print_json_record(record: &FailureRecord) -> AppResult<()> {
+    let output = serialize_json_record(record)
+        .map_err(|error| AppError::tool("log", None, "log-read-failed", error))?;
+    println!("{output}");
     Ok(())
 }
 
@@ -977,13 +1062,16 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
-fn format_timestamp(timestamp: u128, utc: bool) -> Result<String, String> {
+fn timestamp_as_utc(timestamp: u128) -> Result<DateTime<Utc>, String> {
     let millis = i64::try_from(timestamp)
         .map_err(|_| format!("invalid timestamp {timestamp}: outside supported range"))?;
-    let instant = Utc
-        .timestamp_millis_opt(millis)
+    Utc.timestamp_millis_opt(millis)
         .single()
-        .ok_or_else(|| format!("invalid timestamp {timestamp}: outside supported range"))?;
+        .ok_or_else(|| format!("invalid timestamp {timestamp}: outside supported range"))
+}
+
+fn format_timestamp(timestamp: u128, utc: bool) -> Result<String, String> {
+    let instant = timestamp_as_utc(timestamp)?;
     if utc {
         Ok(instant.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string())
     } else {
@@ -991,6 +1079,17 @@ fn format_timestamp(timestamp: u128, utc: bool) -> Result<String, String> {
             .with_timezone(&Local)
             .format("%Y-%m-%d %H:%M:%S%.3f %:z")
             .to_string())
+    }
+}
+
+fn format_rfc3339_timestamp(timestamp: u128, utc: bool) -> Result<String, String> {
+    let instant = timestamp_as_utc(timestamp)?;
+    if utc {
+        Ok(instant.to_rfc3339_opts(SecondsFormat::Millis, false))
+    } else {
+        Ok(instant
+            .with_timezone(&Local)
+            .to_rfc3339_opts(SecondsFormat::Millis, false))
     }
 }
 
@@ -1066,8 +1165,8 @@ mod tests {
     }
 
     #[test]
-    fn log_parser_accepts_utc_without_changing_defaults() {
-        let cli = Cli::try_parse_from(["auth-header", "log", "--utc"]).unwrap();
+    fn log_parser_accepts_json_and_utc_without_changing_defaults() {
+        let cli = Cli::try_parse_from(["auth-header", "log", "--utc", "--json"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Log {
@@ -1075,6 +1174,7 @@ mod tests {
                 all: false,
                 id: None,
                 path: false,
+                json: true,
                 utc: true,
             }
         ));
@@ -1097,8 +1197,74 @@ mod tests {
     }
 
     #[test]
+    fn rfc3339_timestamp_formatting_uses_milliseconds_and_numeric_offset() {
+        assert_eq!(
+            format_rfc3339_timestamp(0, true),
+            Ok("1970-01-01T00:00:00.000+00:00".to_owned())
+        );
+    }
+
+    #[test]
     fn timestamp_formatting_rejects_unrepresentable_values() {
         assert!(format_timestamp(u128::MAX, true).is_err());
+        assert!(format_rfc3339_timestamp(u128::MAX, true).is_err());
+    }
+
+    #[test]
+    fn json_detail_rejects_utc_option() {
+        let error =
+            execute_log(None, false, Some("record-id".to_owned()), false, true, true).unwrap_err();
+        assert_eq!(error.code, "configuration-invalid");
+        assert_eq!(error.message, "--utc cannot be used with --id --json");
+    }
+
+    #[test]
+    fn json_serialization_has_stable_shapes_escaping_and_null_optionals() {
+        let record = FailureRecord {
+            id: "abc-1".to_owned(),
+            timestamp: 0,
+            version: "0.1.0".to_owned(),
+            provider: "profile:\"internal".to_owned(),
+            executable: "company\\cli".to_owned(),
+            category: "invocation".to_owned(),
+            error_code: "command\nfailed".to_owned(),
+            exit_code: None,
+            duration_ms: None,
+        };
+
+        let list = serialize_json_entries(std::slice::from_ref(&record), true).unwrap();
+        let list_value: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert!(list_value.is_array());
+        assert_eq!(list_value[0]["id"], "abc-1");
+        assert_eq!(list_value[0]["timestamp"], "1970-01-01T00:00:00.000+00:00");
+        assert_eq!(list_value[0]["provider"], "profile:\"internal");
+        assert_eq!(list_value[0]["category"], "invocation");
+        assert!(list.contains("\n    \"id\":"));
+        assert!(list.contains("\\\"internal"));
+
+        let detail = serialize_json_record(&record).unwrap();
+        let detail_value: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert!(detail_value.is_object());
+        for field in [
+            "id",
+            "timestamp",
+            "version",
+            "provider",
+            "executable",
+            "category",
+            "error_code",
+            "exit_code",
+            "duration_ms",
+        ] {
+            assert!(detail_value.get(field).is_some(), "missing field {field}");
+        }
+        assert_eq!(detail_value["timestamp"], "1970-01-01T00:00:00.000+00:00");
+        assert_eq!(detail_value["error_code"], "command\nfailed");
+        assert!(detail_value["exit_code"].is_null());
+        assert!(detail_value["duration_ms"].is_null());
+        assert!(detail.contains("\n  \"id\":"));
+        assert!(detail.contains("\\nfailed"));
+        assert_eq!(serialize_json_entries(&[], true).unwrap(), "[]");
     }
 
     #[test]

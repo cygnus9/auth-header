@@ -71,12 +71,23 @@ auth-header log --count 20
 auth-header log --all
 auth-header log --id <id>
 auth-header log --utc
+auth-header log --json
+auth-header log --id <id> --json
 auth-header log --path
 ```
 
-List and detail timestamps default to the process environment's local timezone. Use `--utc` to select UTC. Displayed timestamps use `YYYY-MM-DD HH:MM:SS.sss ±HH:MM`; persisted records retain numeric Unix epoch-millisecond timestamps.
+List and human detail timestamps default to the process environment's local timezone. Use
+`--utc` to select UTC. Human-readable timestamps use
+`YYYY-MM-DD HH:MM:SS.sss ±HH:MM`; persisted records retain numeric Unix
+epoch-millisecond timestamps.
 
-Records contain only an opaque ID, timestamp, version, provider, executable basename, category, error code, exit code, and duration. Credentials, generated headers, child output, environment values, and argument lists are never persisted. Up to 100 recent records are retained. If record writing fails, the original provider error and exit status are preserved.
+`--json` emits pretty-printed machine-readable output. List mode emits a top-level
+array whose entries contain exactly `id`, `timestamp`, `provider`, and `category`.
+Detail mode emits one complete safe-record object with exactly `id`, `timestamp`,
+`version`, `provider`, `executable`, `category`, `error_code`, `exit_code`, and
+`duration_ms`; unavailable optional values are JSON `null`. JSON timestamps use
+RFC 3339 with millisecond precision and a numeric offset. List JSON honors
+`--utc`; detail JSON is always UTC and `--id --json --utc` is rejected.
 
 For isolated testing, `AUTH_HEADER_CONFIG_DIR` and `AUTH_HEADER_STATE_DIR` override the configuration and state directories.
 
